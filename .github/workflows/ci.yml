@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: expense_manager
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/expense_manager?schema=public
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/expense_manager_test?schema=public
+      AUTH_SECRET: ci-only-secret-that-is-long-enough-to-pass-validation-0123456789
+      NEXT_PUBLIC_APP_URL: http://localhost:3100
+      ALLOW_DEMO_SEED: "true"
+      PRISMA_HIDE_UPDATE_MESSAGE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Migrations apply cleanly and match the schema
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE expense_manager_test"
+          npx prisma migrate deploy
+          npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$TEST_DATABASE_URL" --exit-code
+      - name: Unit tests
+        run: npm run test:unit
+      - name: Integration tests
+        run: npm run test:integration
+      - name: Build
+        run: npm run build
+      - name: Seed demo data
+        run: npm run db:seed
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end tests
+        run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7

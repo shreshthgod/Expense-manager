@@ -1,0 +1,904 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Ledger effects (see server/ledger/effects.ts):
+///   EXPENSE     accountId −amount
+///   INCOME      accountId +amount
+///   TRANSFER    accountId −amount, destinationAccountId +amount
+///   REFUND      accountId +amount (money back; reduces spending in its category)
+///   ADJUSTMENT  accountId −amount (outflow) OR destinationAccountId +amount (inflow);
+///               used only for explicit balance corrections (reconciliation, opening fix).
+///               Never counted as income or spending.
+enum TransactionType {
+  EXPENSE
+  INCOME
+  TRANSFER
+  ADJUSTMENT
+  REFUND
+}
+
+enum RuleMode {
+  SUGGEST
+  AUTO
+}
+
+enum ReconciliationStatus {
+  IN_PROGRESS
+  COMPLETED
+  REOPENED
+}
+
+enum ImportStatus {
+  PREVIEWED
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+/// What happens to unused (or overspent) money at the end of a budget cycle.
+///  NONE          every cycle starts at the configured limit
+///  POSITIVE_ONLY unused money carries forward; overspending does not
+///  FULL          unused money carries forward AND overspending reduces the next cycle
+enum RolloverMode {
+  NONE
+  POSITIVE_ONLY
+  FULL
+}
+
+enum GoalKind {
+  SAVINGS
+  SINKING_FUND
+  EMERGENCY_FUND
+}
+
+/// PLANNED rows are projections only (no balance effect). POSTED rows are actual.
+enum TransactionStatus {
+  PLANNED
+  POSTED
+}
+
+enum OutboxStatus {
+  PENDING
+  DONE
+  FAILED
+}
+
+enum BudgetPeriod {
+  MONTHLY
+  WEEKLY
+  YEARLY
+  CUSTOM
+}
+
+enum RecurrenceFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum AccountType {
+  CASH
+  BANK
+  SAVINGS
+  CREDIT_CARD
+  WALLET
+  INVESTMENT
+  LOAN
+  OTHER_ASSET
+  OTHER_LIABILITY
+}
+
+/// Essential spending is used by emergency-fund, runway and safe-to-spend maths.
+enum SpendingClass {
+  ESSENTIAL
+  DISCRETIONARY
+}
+
+enum CostBehavior {
+  FIXED
+  VARIABLE
+}
+
+enum CategoryType {
+  EXPENSE
+  INCOME
+  BOTH
+}
+
+enum NotificationType {
+  BUDGET_THRESHOLD
+  BUDGET_EXCEEDED
+  GOAL_DEADLINE
+  UNUSUAL_TRANSACTION
+  RECURRING_UPCOMING
+  AI_RECOMMENDATION
+  REPORT_GENERATED
+  GOAL_MILESTONE
+  BILL_DUE
+  SUBSCRIPTION_RENEWAL
+  IMPORT_COMPLETED
+  RECURRING_FAILED
+}
+
+/// One rule model for every scheduled money event (shared recurrence maths).
+enum RecurringKind {
+  STANDARD
+  BILL
+  SUBSCRIPTION
+}
+
+/// SCHEDULED: pre-created future occurrence (override/skip placeholder)
+/// DUE:       date reached, awaiting payment/recording (bills, reminder-only rules)
+/// RECORDED:  linked to exactly one transaction
+/// SKIPPED:   intentionally not paid/recorded
+/// FAILED:    automatic recording failed (retry from the inbox)
+enum OccurrenceStatus {
+  SCHEDULED
+  DUE
+  RECORDED
+  SKIPPED
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum ReportType {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  SPENDING_ANALYSIS
+  BUDGET
+  SAVINGS
+  FINANCIAL_HEALTH
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  avatarUrl    String?
+  onboardedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  profile               Profile?
+  preference            UserPreference?
+  accounts              Account[]
+  categories            Category[]
+  transactions          Transaction[]
+  budgets               Budget[]
+  goals                 SavingsGoal[]
+  recurringTransactions RecurringTransaction[]
+  notifications         Notification[]
+  conversations         AIConversation[]
+  reports               AIReport[]
+  auditLogs             AuditLog[]
+  sessions              Session[]
+  idempotencyRecords    IdempotencyRecord[]
+  merchants             Merchant[]
+  automationRules       AutomationRule[]
+  attachments           Attachment[]
+  reconciliations       Reconciliation[]
+  importJobs            ImportJob[]
+  importMappings        ImportMapping[]
+  transactionTemplates  TransactionTemplate[]
+  budgetTemplates       BudgetTemplate[]
+  goalContributions     GoalContribution[]
+  financialSnapshots    FinancialSnapshot[]
+
+  @@index([email])
+}
+
+/// Server-side session record. The signed cookie carries the session id (`sid`);
+/// a session is valid only while this row exists, is not revoked and not expired.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  userAgent  String?
+  ipAddress  String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+model Profile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  /// Planning preference only — never counted as income.
+  monthlyIncome   Decimal? @db.Decimal(14, 2)
+  occupation      String?
+  /// IANA zone that defines "today" and period boundaries for this user's financial dates.
+  timezone        String   @default("Asia/Kolkata")
+  /// Resumable onboarding progress: { step, completedSteps[], accountId?, ... }.
+  onboardingState Json?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserPreference {
+  id                  String  @id @default(cuid())
+  userId              String  @unique
+  currency            String  @default("INR")
+  dateFormat          String  @default("DD MMM YYYY")
+  theme               String  @default("system")
+  notifyBudget        Boolean @default(true)
+  notifyGoal          Boolean @default(true)
+  notifyAIInsight     Boolean @default(true)
+  notifyRecurring     Boolean @default(true)
+  notifyBills         Boolean @default(true)
+  notifyAnomalies     Boolean @default(true)
+  /// 0 = Sunday … 6 = Saturday. Drives weekly budget cycles and "this week" ranges.
+  weekStartsOn        Int     @default(1)
+  /// Day of month (1-28) on which the user's financial month starts (payday cycle).
+  monthStartDay       Int     @default(1)
+  defaultAccountId    String?
+  emergencyFundMonths Int     @default(6)
+  /// Dashboard widget order / visibility and default period.
+  dashboardLayout     Json?
+  /// "system" | "reduced" | "off" — the OS reduced-motion setting always wins.
+  motion              String  @default("system")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Balance convention: `balance` is signed "money you have". Liability accounts
+/// (credit cards, loans) carry a negative balance while money is owed.
+/// Invariant: balance = openingBalance + Σ ledger effects of the account's transactions.
+model Account {
+  id                String      @id @default(cuid())
+  userId            String
+  name              String
+  type              AccountType
+  balance           Decimal     @default(0) @db.Decimal(14, 2)
+  openingBalance    Decimal     @default(0) @db.Decimal(14, 2)
+  /// Date as of which openingBalance was true. Later corrections are ADJUSTMENT rows.
+  openingDate       DateTime?   @db.Date
+  currency          String      @default("INR")
+  institution       String?
+  notes             String?
+  includeInNetWorth Boolean     @default(true)
+  /// Credit cards: never store full card numbers or CVV — last 4 digits only.
+  creditLimit       Decimal?    @db.Decimal(14, 2)
+  statementDay      Int?
+  paymentDueDay     Int?
+  maskedNumber      String?
+  lastReconciledAt  DateTime?
+  archivedAt        DateTime?
+  version           Int         @default(1)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions          Transaction[]
+  incomingTransfers     Transaction[]          @relation("TransferDestination")
+  recurringTransactions RecurringTransaction[]
+  incomingRecurring     RecurringTransaction[] @relation("RecurringDestination")
+  reconciliations       Reconciliation[]
+
+  @@index([userId])
+  @@index([userId, archivedAt])
+}
+
+/// Every category belongs to exactly one user. Default ("system") categories are
+/// created per user from `lib/constants` templates by `ensureSystemCategories(userId)`;
+/// they cannot be renamed or deleted, but can be recoloured, reclassified or archived.
+model Category {
+  id            String         @id @default(cuid())
+  userId        String
+  name          String
+  icon          String?
+  color         String?
+  type          CategoryType   @default(EXPENSE)
+  isSystem      Boolean        @default(false)
+  spendingClass SpendingClass?
+  costBehavior  CostBehavior?
+  archivedAt    DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions          Transaction[]
+  budgets               Budget[]
+  recurringTransactions RecurringTransaction[]
+  splits                TransactionSplit[]
+  merchants             Merchant[]
+  rules                 AutomationRule[]
+
+  @@unique([userId, name])
+  @@index([userId, archivedAt])
+}
+
+model Transaction {
+  id                     String            @id @default(cuid())
+  userId                 String
+  accountId              String?
+  /// TRANSFER only: the account that receives the money (accountId is the source).
+  destinationAccountId   String?
+  categoryId             String?
+  type                   TransactionType
+  status                 TransactionStatus @default(POSTED)
+  /// Always positive (CHECK constraint). Direction comes from `type`.
+  amount                 Decimal           @db.Decimal(14, 2)
+  description            String?
+  merchant               String?
+  /// Calendar date in the user's time zone (no time component, no drift).
+  transactionDate        DateTime          @db.Date
+  paymentMethod          String?
+  notes                  String?
+  location               String?
+  tags                   String[]          @default([])
+  isRecurring            Boolean           @default(false)
+  recurringTransactionId String?
+  /// REFUND only: the purchase being refunded.
+  originalTransactionId  String?
+  /// True when category allocations live in TransactionSplit (categoryId is then null).
+  isSplit                Boolean           @default(false)
+  /// Normalised merchant; `merchant` keeps the original text.
+  merchantId             String?
+  reconciledAt           DateTime?
+  reconciliationId       String?
+  importJobId            String?
+  importRowIndex         Int?
+  /// Soft delete: the row keeps its history, its ledger effect is reversed, undo restores it.
+  deletedAt              DateTime?
+  /// Optimistic concurrency: edits must send the version they were based on.
+  version                Int               @default(1)
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account              Account?              @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  destinationAccount   Account?              @relation("TransferDestination", fields: [destinationAccountId], references: [id], onDelete: SetNull)
+  category             Category?             @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  recurringTransaction RecurringTransaction? @relation(fields: [recurringTransactionId], references: [id], onDelete: SetNull)
+  occurrence           RecurringOccurrence?
+  originalTransaction  Transaction?          @relation("Refunds", fields: [originalTransactionId], references: [id], onDelete: Restrict)
+  refunds              Transaction[]         @relation("Refunds")
+  splits               TransactionSplit[]
+  merchantRef          Merchant?             @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  reconciliation       Reconciliation?       @relation(fields: [reconciliationId], references: [id], onDelete: SetNull)
+  importJob            ImportJob?            @relation(fields: [importJobId], references: [id], onDelete: SetNull)
+  attachments          Attachment[]
+
+  @@unique([importJobId, importRowIndex])
+  @@index([userId, transactionDate])
+  @@index([userId, type])
+  @@index([categoryId])
+  @@index([userId, merchant])
+  @@index([accountId, transactionDate])
+  @@index([destinationAccountId, transactionDate])
+  @@index([originalTransactionId])
+  @@index([userId, merchantId])
+  @@index([tags], type: Gin)
+}
+
+/// Category allocation of one transaction. Σ amount = parent amount (enforced
+/// in the service). Budgets and category analytics use allocations, so a split
+/// purchase is never counted in full in every category.
+model TransactionSplit {
+  id            String  @id @default(cuid())
+  userId        String
+  transactionId String
+  categoryId    String
+  amount        Decimal @db.Decimal(14, 2)
+  note          String?
+  position      Int     @default(0)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([userId, categoryId])
+}
+
+/// A normalised merchant ("Amazon") and the raw spellings that map to it.
+model Merchant {
+  id                String   @id @default(cuid())
+  userId            String
+  name              String
+  defaultCategoryId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  defaultCategory Category?       @relation(fields: [defaultCategoryId], references: [id], onDelete: SetNull)
+  aliases         MerchantAlias[]
+  transactions    Transaction[]
+
+  @@unique([userId, name])
+}
+
+/// Case-insensitive "contains" pattern, e.g. "amzn mktp" → Amazon.
+model MerchantAlias {
+  id         String   @id @default(cuid())
+  userId     String
+  merchantId String
+  pattern    String
+  createdAt  DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, pattern])
+  @@index([merchantId])
+}
+
+/// Deterministic automation: IF all set conditions match THEN actions.
+/// SUGGEST only proposes; AUTO fills empty fields when explicitly enabled.
+model AutomationRule {
+  id                  String           @id @default(cuid())
+  userId              String
+  name                String
+  priority            Int              @default(100)
+  active              Boolean          @default(true)
+  mode                RuleMode         @default(SUGGEST)
+  matchMerchant       String?
+  matchDescription    String?
+  minAmount           Decimal?         @db.Decimal(14, 2)
+  maxAmount           Decimal?         @db.Decimal(14, 2)
+  matchAccountId      String?
+  matchType           TransactionType?
+  setCategoryId       String?
+  addTags             String[]         @default([])
+  setMerchantName     String?
+  descriptionTemplate String?
+  appliedCount        Int              @default(0)
+  lastAppliedAt       DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  setCategory Category? @relation(fields: [setCategoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, active, priority])
+}
+
+/// Receipt / document attached to a transaction. Bytes live in AttachmentBlob
+/// so listing attachments never loads file contents.
+model Attachment {
+  id            String   @id @default(cuid())
+  userId        String
+  transactionId String
+  fileName      String
+  contentType   String
+  size          Int
+  sha256        String
+  createdAt     DateTime @default(now())
+
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction     @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  blob        AttachmentBlob?
+
+  @@index([transactionId])
+  @@index([userId, createdAt])
+}
+
+model AttachmentBlob {
+  attachmentId String @id
+  data         Bytes
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+}
+
+/// Statement reconciliation for one account as of a statement date.
+model Reconciliation {
+  id                      String               @id @default(cuid())
+  userId                  String
+  accountId               String
+  statementDate           DateTime             @db.Date
+  statementBalance        Decimal              @db.Decimal(14, 2)
+  /// App balance as of statementDate when the reconciliation was completed.
+  computedBalance         Decimal              @db.Decimal(14, 2)
+  status                  ReconciliationStatus @default(IN_PROGRESS)
+  adjustmentTransactionId String?
+  notes                   String?
+  reopenReason            String?
+  completedAt             DateTime?
+  reopenedAt              DateTime?
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId, accountId, statementDate])
+}
+
+/// One statement import. Rows keep stable indexes; transactions carry
+/// (importJobId, importRowIndex) UNIQUE, so a retried confirm can't insert twice.
+model ImportJob {
+  id             String       @id @default(cuid())
+  userId         String
+  accountId      String
+  fileName       String
+  fileHash       String
+  status         ImportStatus @default(PREVIEWED)
+  rows           Json
+  mapping        Json
+  totalRows      Int
+  importedCount  Int          @default(0)
+  skippedCount   Int          @default(0)
+  failedCount    Int          @default(0)
+  duplicateCount Int          @default(0)
+  summary        Json?
+  createdAt      DateTime     @default(now())
+  completedAt    DateTime?
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId, createdAt])
+}
+
+/// Saved column mapping preset ("HDFC CSV", "SBI CSV"…).
+model ImportMapping {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  config    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
+/// Favourite / frequent entries ("Coffee", "Fuel") that prefill the form.
+model TransactionTemplate {
+  id                   String          @id @default(cuid())
+  userId               String
+  name                 String
+  type                 TransactionType
+  amount               Decimal?        @db.Decimal(14, 2)
+  accountId            String?
+  destinationAccountId String?
+  categoryId           String?
+  merchant             String?
+  description          String?
+  tags                 String[]        @default([])
+  position             Int             @default(0)
+  createdAt            DateTime        @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
+model Budget {
+  id           String       @id @default(cuid())
+  userId       String
+  name         String
+  amount       Decimal      @db.Decimal(14, 2)
+  period       BudgetPeriod
+  /// Anchor of the cycle series (and first day of the first cycle).
+  startDate    DateTime     @db.Date
+  /// Last day (inclusive) on which the budget applies. CUSTOM: required. Recurring: optional stop date.
+  endDate      DateTime?    @db.Date
+  categoryId   String?
+  rolloverMode RolloverMode @default(NONE)
+  version      Int          @default(1)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([userId, startDate])
+}
+
+model SavingsGoal {
+  id                  String    @id @default(cuid())
+  userId              String
+  name                String
+  targetAmount        Decimal   @db.Decimal(14, 2)
+  currentAmount       Decimal   @default(0) @db.Decimal(14, 2)
+  deadline            DateTime? @db.Date
+  category            String?
+  description         String?
+  kind                GoalKind  @default(SAVINGS)
+  /// Where the money for this goal is kept (optional). Earmarks never move money.
+  accountId           String?
+  /// Planned monthly contribution (for projections and expected completion).
+  monthlyContribution Decimal?  @db.Decimal(14, 2)
+  /// Sinking funds: restart the target after each deadline (annual costs).
+  repeatsYearly       Boolean   @default(false)
+  archivedAt          DateTime?
+  completedAt         DateTime?
+  version             Int       @default(1)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contributions GoalContribution[]
+
+  @@index([userId])
+}
+
+/// A recurring rule: plain recurring transaction, bill or subscription.
+/// Occurrence k falls on occurrenceAt(startDate, frequency, interval, k)
+/// (lib/finance/recurrence.ts), anchored on startDate's day of month.
+model RecurringTransaction {
+  id                   String              @id @default(cuid())
+  userId               String
+  kind                 RecurringKind       @default(STANDARD)
+  name                 String?
+  accountId            String?
+  destinationAccountId String?
+  categoryId           String?
+  type                 TransactionType
+  amount               Decimal             @db.Decimal(14, 2)
+  description          String?
+  merchant             String?
+  notes                String?
+  frequency            RecurrenceFrequency
+  interval             Int                 @default(1)
+  /// Anchor: the first occurrence date.
+  startDate            DateTime            @db.Date
+  /// Cursor: the next occurrence date not yet materialized.
+  nextExecutionDate    DateTime            @db.Date
+  endDate              DateTime?           @db.Date
+  /// false = paused. Paused rules generate nothing.
+  active               Boolean             @default(true)
+  /// true = record the transaction automatically when due (explicit opt-in);
+  /// false = reminder only: the occurrence waits for the user to pay/record it.
+  autoCreate           Boolean             @default(true)
+  /// Bills: the provider charges automatically (describes expected external behaviour only).
+  autopay              Boolean             @default(false)
+  reminderDaysBefore   Int                 @default(3)
+  cancelledAt          DateTime?
+  lastExecutedAt       DateTime?
+  version              Int                 @default(1)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account            Account?              @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  destinationAccount Account?              @relation("RecurringDestination", fields: [destinationAccountId], references: [id], onDelete: SetNull)
+  category           Category?             @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  transactions       Transaction[]
+  occurrences        RecurringOccurrence[]
+
+  @@index([userId, nextExecutionDate])
+  @@index([userId, active])
+  @@index([userId, kind])
+  @@index([active, nextExecutionDate])
+}
+
+/// One scheduled instance of a rule. The unique (recurringId, dueDate) makes
+/// every processor run idempotent and race-safe; transactionId is unique so
+/// one payment settles at most one occurrence.
+model RecurringOccurrence {
+  id            String           @id @default(cuid())
+  userId        String
+  recurringId   String
+  dueDate       DateTime         @db.Date
+  amount        Decimal          @db.Decimal(14, 2)
+  status        OccurrenceStatus @default(DUE)
+  transactionId String?          @unique
+  ruleVersion   Int              @default(1)
+  failureReason String?
+  resolvedAt    DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  recurring   RecurringTransaction @relation(fields: [recurringId], references: [id], onDelete: Cascade)
+  transaction Transaction?         @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@unique([recurringId, dueDate])
+  @@index([userId, dueDate])
+  @@index([userId, status])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      NotificationType
+  read      Boolean          @default(false)
+  link      String?
+  /// Stable key for one logical event (e.g. `budget:<id>:<cycle>:90`). Enforced unique per
+  /// user so an event notifies once, whether or not the earlier notification was read.
+  dedupeKey String?
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+model AIConversation {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("New conversation")
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages AIMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model AIMessage {
+  id             String      @id @default(cuid())
+  conversationId String
+  role           MessageRole
+  content        String
+  toolName       String?
+  metadata       Json?
+  createdAt      DateTime    @default(now())
+
+  conversation AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model AIReport {
+  id          String     @id @default(cuid())
+  userId      String
+  type        ReportType
+  startDate   DateTime   @db.Date
+  /// Inclusive last day of the reporting period.
+  endDate     DateTime   @db.Date
+  title       String
+  summary     String
+  content     Json
+  healthScore Int?
+  metadata    Json?
+  createdAt   DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
+
+/// Exactly-once guard for retryable creates. Written in the SAME database
+/// transaction as the business write, so a replay returns the stored response.
+model IdempotencyRecord {
+  id             String   @id @default(cuid())
+  userId         String
+  key            String
+  scope          String
+  requestHash    String
+  responseStatus Int
+  responseBody   Json
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@index([createdAt])
+}
+
+/// Durable post-commit side effects (budget evaluation, anomaly checks, …).
+/// Inserted inside the financial transaction; processed right after commit and
+/// retried by the scheduler if the process dies first.
+model OutboxEvent {
+  id          String       @id @default(cuid())
+  userId      String
+  type        String
+  payload     Json
+  status      OutboxStatus @default(PENDING)
+  attempts    Int          @default(0)
+  lastError   String?
+  availableAt DateTime     @default(now())
+  processedAt DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([status, availableAt])
+  @@index([userId, createdAt])
+}
+
+/// Fixed-window counters for the shared (multi-instance) rate limiter.
+model RateLimitBucket {
+  key         String   @id
+  windowStart DateTime
+  count       Int
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// Reusable set of budget allocations ("Normal month", "Travel month").
+model BudgetTemplate {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  /// [{ name, categoryId|null, amount, period, rolloverMode }]
+  items     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
+/// Ledger of money earmarked for (positive) or released from (negative) a goal.
+/// SavingsGoal.currentAmount = Σ contributions. A contribution may link the
+/// transfer that physically moved the money (explicit transfer mode only).
+model GoalContribution {
+  id            String   @id @default(cuid())
+  userId        String
+  goalId        String
+  amount        Decimal  @db.Decimal(14, 2)
+  date          DateTime @db.Date
+  note          String?
+  transactionId String?
+  createdAt     DateTime @default(now())
+
+  user User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  goal SavingsGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@index([goalId, date])
+  @@index([userId, date])
+}
+
+/// Month-end financial snapshot. Captured automatically after each financial
+/// month and when the user marks the month reviewed, so history stays stable
+/// even if settings or categories change later.
+model FinancialSnapshot {
+  id          String    @id @default(cuid())
+  userId      String
+  periodStart DateTime  @db.Date
+  periodEnd   DateTime  @db.Date
+  assets      Decimal   @db.Decimal(14, 2)
+  liabilities Decimal   @db.Decimal(14, 2)
+  netWorth    Decimal   @db.Decimal(14, 2)
+  liquid      Decimal   @db.Decimal(14, 2)
+  income      Decimal   @db.Decimal(14, 2)
+  netSpending Decimal   @db.Decimal(14, 2)
+  surplus     Decimal   @db.Decimal(14, 2)
+  /// Full review payload (budgets, categories, merchants, goals…).
+  data        Json
+  reviewedAt  DateTime?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodStart])
+}

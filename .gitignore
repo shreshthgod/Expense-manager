@@ -1,0 +1,23 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+.env
+.env.local
+.env.production
+
+*.tsbuildinfo
+next-env.d.ts
+
+coverage/
+.DS_Store
+Thumbs.db
+
+prisma/migrations/dev.db*
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/

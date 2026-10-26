@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens — "passbook ink".
+ * Colours are HSL triplets consumed by tailwind.config.ts.
+ * inflow/outflow are semantic money colours: use them ONLY for amounts and
+ * their direction, never as decoration.
+ */
+@layer base {
+  :root {
+    --background: 220 20% 97%;        /* paper #F5F6F8 */
+    --foreground: 220 38% 15%;        /* ink #172033 */
+    --card: 0 0% 100%;
+    --card-foreground: 220 38% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 38% 15%;
+    --primary: 220 54% 36%;           /* ledger blue #2A4A8C */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 20% 93%;
+    --secondary-foreground: 220 38% 15%;
+    --muted: 220 20% 94%;
+    --muted-foreground: 220 12% 40%;
+    --accent: 220 30% 93%;
+    --accent-foreground: 220 38% 15%;
+    --destructive: 5 51% 47%;         /* #B4443A */
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 16% 88%;
+    --input: 220 16% 84%;
+    --ring: 220 54% 44%;
+    --inflow: 159 60% 30%;            /* #1F7A5C */
+    --outflow: 5 51% 47%;             /* #B4443A */
+    --warning: 38 81% 36%;            /* #A86B12 */
+    --warning-soft: 40 90% 94%;
+    --inflow-soft: 156 45% 93%;
+    --outflow-soft: 6 70% 95%;
+    --primary-soft: 220 60% 95%;
+    --chart-1: 220 54% 42%;
+    --chart-2: 159 55% 34%;
+    --chart-3: 32 80% 48%;
+    --chart-4: 280 35% 50%;
+    --chart-5: 190 60% 38%;
+    --chart-6: 5 51% 52%;
+    --chart-grid: 220 16% 88%;
+    --radius: 0.875rem;
+    color-scheme: light;
+  }
+
+  .dark {
+    --background: 222 42% 9%;         /* #0E1422 */
+    --foreground: 220 30% 92%;
+    --card: 222 36% 12%;
+    --card-foreground: 220 30% 92%;
+    --popover: 222 36% 13%;
+    --popover-foreground: 220 30% 92%;
+    --primary: 222 90% 76%;           /* lighter ink for contrast on dark */
+    --primary-foreground: 222 42% 12%;
+    --secondary: 222 28% 18%;
+    --secondary-foreground: 220 30% 92%;
+    --muted: 222 28% 16%;
+    --muted-foreground: 220 14% 66%;
+    --accent: 222 28% 19%;
+    --accent-foreground: 220 30% 92%;
+    --destructive: 5 78% 66%;
+    --destructive-foreground: 222 42% 10%;
+    --border: 222 24% 21%;
+    --input: 222 24% 26%;
+    --ring: 222 90% 72%;
+    --inflow: 156 52% 55%;
+    --outflow: 5 78% 68%;
+    --warning: 40 85% 60%;
+    --warning-soft: 38 40% 16%;
+    --inflow-soft: 158 35% 15%;
+    --outflow-soft: 5 35% 17%;
+    --primary-soft: 222 40% 20%;
+    --chart-1: 222 90% 72%;
+    --chart-2: 156 52% 52%;
+    --chart-3: 36 85% 60%;
+    --chart-4: 280 50% 72%;
+    --chart-5: 190 60% 55%;
+    --chart-6: 5 78% 66%;
+    --chart-grid: 222 24% 22%;
+    color-scheme: dark;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "kern" 1, "calt" 1;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply tracking-tight text-foreground;
+    text-wrap: balance;
+  }
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  /* Theme switches: short colour transition only (no layout, no blur). */
+  .theme-transition,
+  .theme-transition * {
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease !important;
+  }
+}
+
+@layer utilities {
+  /* Money and any column of numbers. */
+  .num {
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: "tnum" 1, "lnum" 1;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 3px;
+  }
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .sr-only-focusable:not(:focus):not(:active) {
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+}
+
+/* Skeleton shimmer (disabled under reduced motion). */
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.skeleton {
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+/* Honour OS reduced motion everywhere, and the in-app "Off" setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+html[data-motion="reduced"] .skeleton {
+  animation: none;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+}
+
+/* Printing (reports, reviews): only the page content, in light ink on white. */
+@media print {
+  aside,
+  header,
+  nav,
+  [role="region"][aria-label="Bulk actions"],
+  .print\:hidden {
+    display: none !important;
+  }
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  main {
+    padding: 0 !important;
+  }
+  .rounded-xl,
+  .rounded-2xl {
+    break-inside: avoid;
+  }
+}
